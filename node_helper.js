@@ -490,6 +490,7 @@ module.exports = NodeHelper.create({
     // failure modes are real - a broker with an ACL on the discovery prefix
     // will refuse every write, and a connection can drop mid-publish. One
     // attempt at startup is enough to keep Home Assistant tidy.
+    if (this.config.cleanupStaleEntities === false) return;
     if (this.staleCleanupAttempted) return;
     this.staleCleanupAttempted = true;
 
@@ -522,19 +523,26 @@ module.exports = NodeHelper.create({
       // so settle for a short window before deciding what is stale.
       setTimeout(() => {
         client.removeListener('message', onMessage);
-        client.unsubscribe(wildcard);
 
         if (this.client !== client) {
           Log.warn('[MMM-HomeAssistant] MQTT client was replaced during cleanup, leaving stale configs alone');
           return;
         }
         if (seen.size === 0) {
+          client.unsubscribe(wildcard);
           Log.debug('[MMM-HomeAssistant] No stale discovery configs found');
           return;
         }
 
-        // One at a time with QoS 1, so a refusal names the topic it happened
-        // on instead of vanishing into a burst of fire-and-forget publishes.
+        // Publishing starts only once the UNSUBSCRIBE below has been
+        // acknowledged. Doing both in the same tick lets Node batch them into
+        // a single vectored write, and a writev whose iovec holds the
+        // zero-length payload used to clear a retained message fails with
+        // EFAULT on arm64. The round trip keeps them in separate writes.
+        //
+        // The publishes then go one at a time with QoS 1, so a refusal names
+        // the topic it happened on rather than vanishing into a burst - and
+        // the acknowledgement between each keeps those separate too.
         const pending = [...seen];
         const total = pending.length;
         let removed = 0;
@@ -543,7 +551,7 @@ module.exports = NodeHelper.create({
           const topic = pending.shift();
           if (!topic) {
             if (removed < total) {
-              Log.error(`[MMM-HomeAssistant] Removed ${removed} of ${total} stale discovery configs; the rest were refused. Check that this MQTT user may publish to ${this.config.autodiscoveryTopic}/#`);
+              Log.error(`[MMM-HomeAssistant] Removed ${removed} of ${total} stale discovery configs; the rest failed. If this repeats, check that this MQTT user may publish to ${this.config.autodiscoveryTopic}/#, or set cleanupStaleEntities: false`);
             } else {
               Log.info(`[MMM-HomeAssistant] Removed ${removed} stale discovery config(s)`);
             }
@@ -563,7 +571,10 @@ module.exports = NodeHelper.create({
             next();
           });
         };
-        next();
+
+        function startRemoving() { next(); }
+
+        client.unsubscribe(wildcard, () => startRemoving());
       }, 3000);
     });
   },

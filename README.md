@@ -101,6 +101,7 @@ Using Wayland, the xrandr commands to pull monitor status and control on/off do 
 | `pm2ProcessName`      | string   | *(none)*            | If set, allows MagicMirror to be restarted via Home Assistant.                                                      |
 | `refreshBrowser`      | boolean  | `true`              | If enabled, will programmatically open and close a browser to refresh MagicMirror clients on other instances.       |
 | `customCommands`      | array    | *(none)*            | Array of custom commands to execute. See [Custom Commands](#custom-commands) section below.                         |
+| `cleanupStaleEntities`| boolean  | `true`              | Remove Home Assistant entities for modules that no longer exist. See [Stale entities](#stale-entities).             |
 
 Individual modules may also set `haEntityId` in their own config to pin their
 Home Assistant entity name. See [Naming module switches](#naming-module-switches).
@@ -166,6 +167,15 @@ Only this device's per-module `switch` configs are pruned. The device light and
 the button entities are never touched, and nothing is pruned on a run where the
 module list was not available - otherwise a startup race could wipe every
 entity.
+
+It is attempted **once per process**, whatever the outcome. The client
+reconnects on its own, so retrying would turn a single failure into a loop:
+publish, fail, reconnect, find the same topics, publish again. Worst case is now
+one error at startup.
+
+Set `cleanupStaleEntities: false` to turn it off. Worth doing if the log shows
+the removals failing every start - a broker with an ACL on the discovery prefix
+will refuse them, and on arm64 the write can fail outright.
 
 ## Custom Commands
 
