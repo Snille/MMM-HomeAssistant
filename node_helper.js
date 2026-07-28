@@ -21,6 +21,7 @@ module.exports = NodeHelper.create({
 
     this.monitorValue = 'unknown';
     this.brightnessValue = 0;
+    this.monitorPollTimer = null;
 
     const nsp = this.io.of('/MMM-HomeAssistant');
     nsp.on('connection', (socket) => {
@@ -31,6 +32,12 @@ module.exports = NodeHelper.create({
         Log.debug('[MMM-HomeAssistant] Socket disconnected:', socket.id);
         delete this.clients[socket.id];
         if (Object.keys(this.clients).length === 0) {
+          // No clients left. Stop polling before dropping the MQTT client,
+          // otherwise the timer keeps firing publishStates() against null.
+          if (this.monitorPollTimer) {
+            clearInterval(this.monitorPollTimer);
+            this.monitorPollTimer = null;
+          }
           // No clients connected, disconnect from MQTT
           if (this.client) {
             Log.debug('[MMM-HomeAssistant] No clients connected, disconnecting from MQTT');
@@ -105,8 +112,12 @@ module.exports = NodeHelper.create({
       if (!this.mqttCloseLogged) {
         Log.debug('[MMM-HomeAssistant] MQTT connection closed');
         this.mqttCloseLogged = true; // Set close flag to prevent repeated logging
-        // Publish last will message to availability topic
-        this.client.publish(this.availabilityTopic, 'offline', { retain: true });
+        // Publish last will message to availability topic.
+        // 'close' fires asynchronously, so this.client may already have been
+        // cleared by the disconnect handler that called end().
+        if (this.client) {
+          this.client.publish(this.availabilityTopic, 'offline', { retain: true });
+        }
       }
     });
   },
@@ -453,6 +464,13 @@ module.exports = NodeHelper.create({
   },
 
   publishStates: function () {
+    // Nothing to publish to while disconnected. This is reachable from the
+    // monitor poll timer and from frontend notifications, both of which can
+    // arrive after the last client went away and the client was cleared.
+    if (!this.client) {
+      return;
+    }
+
     // Publish initial values to the device topic as JSON
     const payload = {};
     if (this.config.brightnessControl || this.config.monitorControl) {
@@ -461,7 +479,9 @@ module.exports = NodeHelper.create({
     if (this.config.brightnessControl) {
       payload.brightness = this.brightnessValue;
     }
-    if (this.config.moduleControl) {
+    // this.modules is only populated once the frontend sends MODULES_UPDATE,
+    // which can arrive after the first monitor poll has already fired.
+    if (this.config.moduleControl && Array.isArray(this.modules)) {
       this.modules.forEach(element => {
         payload[element.urlPath] = element.hidden ? 'OFF' : 'ON';
       });
@@ -474,6 +494,13 @@ module.exports = NodeHelper.create({
   },
 
   watchEndpoints: function () {
+    // MQTT_INIT arrives on every frontend start, so this can be called many
+    // times over the life of the helper. Without this guard each call added
+    // another interval and they accumulated, all polling the same command.
+    if (this.monitorPollTimer) {
+      return;
+    }
+
     if (this.config.monitorStatusCommand) {
 
       const pollMonitorStatus = () => {
@@ -493,7 +520,7 @@ module.exports = NodeHelper.create({
       };
 
       pollMonitorStatus();
-      setInterval(pollMonitorStatus, 5000);
+      this.monitorPollTimer = setInterval(pollMonitorStatus, 5000);
     }
   },
 
