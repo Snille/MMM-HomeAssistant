@@ -21,6 +21,7 @@ module.exports = NodeHelper.create({
 
     this.monitorValue = 'unknown';
     this.brightnessValue = 0;
+    this.profileValue = null;
     this.monitorPollTimer = null;
     this.staleCleanupAttempted = false;
 
@@ -100,6 +101,12 @@ module.exports = NodeHelper.create({
 
       // Subscribe to /set topics
       this.subscribeToSetTopics();
+
+      // Values reported by the frontend arrive before MQTT_INIT brings the
+      // client up, and publishStates() drops anything sent while there is no
+      // client. Without this the entities sit unknown until something happens
+      // to change - which for the profile can be hours.
+      this.publishStates();
     });
 
     this.client.on('error', (err) => {
@@ -161,6 +168,11 @@ module.exports = NodeHelper.create({
           if (this.config.brightnessControl &&
             payload.brightness !== undefined && payload.state !== this.brightnessValue) {
             await this.handleBrightnessSet(payload.brightness);
+          }
+
+          if (this.config.profileControl && payload.profile !== undefined &&
+            payload.profile !== this.profileValue) {
+            this.sendSocketNotification('PROFILE_CONTROL', payload.profile);
           }
 
           if (this.config.moduleControl) {
@@ -371,6 +383,35 @@ module.exports = NodeHelper.create({
 
         topics.push(lightConfigTopic);
         payloads.push(JSON.stringify(combinedJson));
+      }
+
+      // A select entity for the active profile. The options have to be listed
+      // up front because Home Assistant validates against them, and there is
+      // no way to ask MMM-ProfileSwitcher which profiles exist - a profile is
+      // only ever a class name on some module.
+      if (this.config.profileControl) {
+        const profiles = Array.isArray(this.config.profiles)
+          ? this.config.profiles.filter(p => typeof p === 'string' && p.length > 0)
+          : [];
+
+        if (profiles.length === 0) {
+          Log.error('[MMM-HomeAssistant] profileControl is on but no profiles are configured - skipping the profile entity');
+        } else {
+          const selectJson = {
+            availability_topic: this.availabilityTopic,
+            state_topic: this.stateTopic,
+            command_topic: this.setTopic,
+            options: profiles,
+            value_template: '{{ value_json.profile }}',
+            command_template: '{"profile": "{{ value }}" }',
+            name: 'Profile',
+            default_entity_id: `select.${deviceId}_profile`,
+            unique_id: `${deviceId}_profile`,
+          };
+
+          topics.push(`${this.config.autodiscoveryTopic}/select/${deviceId}/profile/config`);
+          payloads.push(JSON.stringify({ ...deviceJson, ...selectJson }));
+        }
       }
 
       const haveModuleList = this.config.moduleControl && Array.isArray(this.modules) && this.modules.length > 0;
@@ -601,6 +642,11 @@ module.exports = NodeHelper.create({
     if (this.config.brightnessControl) {
       payload.brightness = this.brightnessValue;
     }
+    // Left out until the frontend has reported a profile. Publishing null puts
+    // the select entity in an unknown state that is not one of its options.
+    if (this.config.profileControl && this.profileValue) {
+      payload.profile = this.profileValue;
+    }
     // this.modules is only populated once the frontend sends MODULES_UPDATE,
     // which can arrive after the first monitor poll has already fired.
     if (this.config.moduleControl && Array.isArray(this.modules)) {
@@ -667,6 +713,13 @@ module.exports = NodeHelper.create({
         Log.debug('[MMM-HomeAssistant] Received module list from frontend');
       }
       else {
+        this.publishStates();
+      }
+    }
+
+    if (notification === 'PROFILE_UPDATE') {
+      if (payload && payload !== this.profileValue) {
+        this.profileValue = payload;
         this.publishStates();
       }
     }

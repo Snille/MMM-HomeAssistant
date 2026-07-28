@@ -18,6 +18,7 @@ The module uses MQTT autodiscovery to automatically create entities in Home Assi
 - Control MagicMirror monitor (on/off)
 - Adjust MagicMirror brightness
 - Control visibility of individual MagicMirror modules as switches
+- Read and set the active MMM-ProfileSwitcher profile as a select entity
 - Restart MagicMirror process via Home Assistant
 - Execute custom bash commands/scripts via Home Assistant
 
@@ -59,6 +60,8 @@ To use this module, add it to the modules array in the `config/config.js` file:
         monitorControl: true,
         brightnessControl: true,
         moduleControl: true,
+        profileControl: true,
+        profiles: ['Photos', 'Work', 'Weather', 'Media', 'Night'],
         monitorStatusCommand: 'xrandr --query | awk \'/Screen/ {print ($8 > 320) ? "true" : "false"}\'',
         monitorOnCommand: 'xrandr -d :0 --output HDMI-1 --auto --rotate right',
         monitorOffCommand: 'xrandr -d :0 --output HDMI-1 --off',
@@ -98,6 +101,8 @@ Using Wayland, the xrandr commands to pull monitor status and control on/off do 
 | `monitorOnCommand`    | string   | *(none)*            | Shell command to turn on the monitor.                                                                               |
 | `monitorOffCommand`   | string   | *(none)*            | Shell command to turn off the monitor.                                                                              |
 | `moduleControl`       | boolean  | `true`              | Make modules controllable as switch entities.                                                                       |
+| `profileControl`      | boolean  | `false`             | Expose the active MMM-ProfileSwitcher profile as a select entity. Requires `profiles`. See [Profile control](#profile-control). |
+| `profiles`            | array    | *(none)*            | The profile names to offer, e.g. `["Photos", "Work", "Night"]`. Required when `profileControl` is on.                |
 | `pm2ProcessName`      | string   | *(none)*            | If set, allows MagicMirror to be restarted via Home Assistant.                                                      |
 | `refreshBrowser`      | boolean  | `true`              | If enabled, will programmatically open and close a browser to refresh MagicMirror clients on other instances.       |
 | `customCommands`      | array    | *(none)*            | Array of custom commands to execute. See [Custom Commands](#custom-commands) section below.                         |
@@ -109,6 +114,41 @@ Home Assistant entity name. See [Naming module switches](#naming-module-switches
 ## Home Assistant Integration
 
 Entities will appear automatically in Home Assistant if MQTT autodiscovery is enabled. You can control your MagicMirror from the Home Assistant dashboard or automations.
+
+### Profile control
+
+With [MMM-ProfileSwitcher](https://github.com/tosti007/MMM-ProfileSwitcher) installed,
+`profileControl: true` publishes a select entity for the active profile:
+
+```
+select.my_magicmirror_profile
+```
+
+```js
+{
+    module: "MMM-HomeAssistant",
+    config: {
+        profileControl: true,
+        profiles: ["Photos", "Work", "Weather", "Media", "Night"],
+    }
+}
+```
+
+The names must match the profile class names MMM-ProfileSwitcher uses, because
+Home Assistant only accepts options from this list. There is no way to discover
+them automatically - a profile is only ever a class name on some module.
+
+Selecting an option sends `CURRENT_PROFILE`, which is the same notification the
+on-screen profile buttons send, so both routes behave identically.
+
+The state is read back from MMM-ProfileSwitcher's `CHANGED_PROFILE`
+notification, which it emits for every change including the one it makes at
+startup. The entity therefore reflects what the mirror is really showing, even
+when the profile was changed by a button on the mirror rather than from Home
+Assistant. That is what makes it usable as a trigger in automations.
+
+If `profileControl` is on and `profiles` is empty, the entity is skipped and an
+error is logged; everything else keeps working.
 
 ### Naming module switches
 

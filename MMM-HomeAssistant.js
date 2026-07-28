@@ -148,6 +148,13 @@ Module.register("MMM-HomeAssistant", {
   },
 
   socketNotificationReceived(notification, payload) {
+    if (notification === "PROFILE_CONTROL") {
+      Log.info(`[MMM-HomeAssistant] Profile control received: ${payload}`);
+      // MMM-ProfileSwitcher takes a bare string and ignores a change to the
+      // profile it is already on, so there is nothing to guard against here.
+      this.sendNotification("CURRENT_PROFILE", payload);
+    }
+
     if (notification === "MODULE_CONTROL") {
       Log.info(`[MMM-HomeAssistant] Module control received: ${payload.identifier} ${payload.command}`);
       const module = this.modules.find(m => m.identifier === payload.identifier);
@@ -185,6 +192,16 @@ Module.register("MMM-HomeAssistant", {
       this.monitorOverlayBrightness();
       if (this.config.moduleControl === true) {
         this.monitorModulesHiddenState();
+      }
+    }
+
+    // MMM-ProfileSwitcher announces every profile change, and also announces
+    // the profile it selects on startup, so this reports the mirror's real
+    // profile whatever caused the change - a command from Home Assistant, a
+    // press on MMM-TouchNavigation, or one of its own timers.
+    if (notification === "CHANGED_PROFILE" && this.config.profileControl === true) {
+      if (payload && payload.to) {
+        this.sendSocketNotification("PROFILE_UPDATE", payload.to);
       }
     }
   },
