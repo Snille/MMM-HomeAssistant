@@ -490,6 +490,13 @@ module.exports = NodeHelper.create({
     // failure modes are real - a broker with an ACL on the discovery prefix
     // will refuse every write, and a connection can drop mid-publish. One
     // attempt at startup is enough to keep Home Assistant tidy.
+    //
+    // One such failure is open: on a Raspberry Pi 4 (Debian 13, Node 22,
+    // mqtt 5.13) the empty publishes fail with EFAULT out of mqtt-packet's
+    // uncork, while the same publishes from a standalone script against the
+    // same broker on that same machine succeed. So it is something about the
+    // client this module holds, not the platform or the empty payload, and it
+    // is not yet understood. Set cleanupStaleEntities: false there.
     if (this.config.cleanupStaleEntities === false) return;
     if (this.staleCleanupAttempted) return;
     this.staleCleanupAttempted = true;
@@ -534,15 +541,14 @@ module.exports = NodeHelper.create({
           return;
         }
 
-        // Publishing starts only once the UNSUBSCRIBE below has been
-        // acknowledged. Doing both in the same tick lets Node batch them into
-        // a single vectored write, and a writev whose iovec holds the
-        // zero-length payload used to clear a retained message fails with
-        // EFAULT on arm64. The round trip keeps them in separate writes.
+        // Publishing starts from the UNSUBSCRIBE callback below, and the
+        // publishes then go one at a time behind their QoS 1 acknowledgements.
+        // A refusal therefore names the topic it happened on rather than
+        // vanishing into a burst of fire-and-forget writes.
         //
-        // The publishes then go one at a time with QoS 1, so a refusal names
-        // the topic it happened on rather than vanishing into a burst - and
-        // the acknowledgement between each keeps those separate too.
+        // Keeping them in separate writes was also an attempt at the EFAULT
+        // described in removeStaleConfigs' header. It did not fix it, but it
+        // is better behaviour regardless, so it stays.
         const pending = [...seen];
         const total = pending.length;
         let removed = 0;

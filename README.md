@@ -174,8 +174,14 @@ publish, fail, reconnect, find the same topics, publish again. Worst case is now
 one error at startup.
 
 Set `cleanupStaleEntities: false` to turn it off. Worth doing if the log shows
-the removals failing every start - a broker with an ACL on the discovery prefix
-will refuse them, and on arm64 the write can fail outright.
+the removals failing on every start. Two causes are known:
+
+- A broker with an ACL on the discovery prefix refuses the empty publishes.
+- On at least one arm64 host (Raspberry Pi 4, Debian 13, Node 22, mqtt 5.13)
+  the write fails with `EFAULT` out of `mqtt-packet`'s `uncork`. The same
+  publishes from a standalone script on the same machine and broker succeed,
+  so it is something about the client this module holds rather than the
+  platform, but it is not yet understood. x86_64 hosts are unaffected.
 
 ## Custom Commands
 
