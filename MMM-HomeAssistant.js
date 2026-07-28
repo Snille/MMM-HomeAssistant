@@ -30,20 +30,51 @@ Module.register("MMM-HomeAssistant", {
     const getBaseName = (module) => module.name.replace(/MMM-/g, "").replace(/-/g, "");
     const getUrlPath = (name) => name.toLowerCase().replace(/\s+/g, "_");
 
+    // A module may pin its own identity with haEntityId in its config. The
+    // generated names below are derived from how many instances of a module
+    // exist and in what order, so they shift whenever a module is added or
+    // removed - which orphans the entity in Home Assistant. A pinned id
+    // survives that.
+    const sanitizeId = (id) => String(id).toLowerCase().replace(/[^a-z0-9_]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+
+    const pinned = {};
+    this.modules.enumerate((module) => {
+      const raw = module.config && module.config.haEntityId;
+      if (!raw) return;
+      const id = sanitizeId(raw);
+      if (!id) {
+        Log.error(`[MMM-HomeAssistant] haEntityId on ${module.name} is empty after sanitising ("${raw}") - using the generated name`);
+        return;
+      }
+      if (pinned[id]) {
+        Log.error(`[MMM-HomeAssistant] Duplicate haEntityId "${id}" on ${module.name}, already used by ${pinned[id]} - using the generated name instead. Entity ids must be unique.`);
+        return;
+      }
+      pinned[id] = module.name;
+      module._haEntityId = id;
+    });
+
     // Handling multiple instances of the same module
     const baseNameCounts = {};
     this.modules.enumerate((module) => {
+      if (module._haEntityId) return;
       const baseName = getBaseName(module);
       baseNameCounts[baseName] = (baseNameCounts[baseName] || 0) + 1;
     });
     const nameInstance = {};
     const currentModuleData = [];
     this.modules.enumerate((module) => {
-      const baseName = getBaseName(module);
-      nameInstance[baseName] = (nameInstance[baseName] || 0) + 1;
-      let name = baseName;
-      if (baseNameCounts[baseName] > 1) {
-        name = `${baseName}_${nameInstance[baseName]}`;
+      let name;
+      if (module._haEntityId) {
+        name = module._haEntityId;
+      } else {
+        const baseName = getBaseName(module);
+        nameInstance[baseName] = (nameInstance[baseName] || 0) + 1;
+        name = baseName;
+        if (baseNameCounts[baseName] > 1) {
+          name = `${baseName}_${nameInstance[baseName]}`;
+        }
       }
       const entry = {};
       entry.identifier = module.identifier;

@@ -102,9 +102,70 @@ Using Wayland, the xrandr commands to pull monitor status and control on/off do 
 | `refreshBrowser`      | boolean  | `true`              | If enabled, will programmatically open and close a browser to refresh MagicMirror clients on other instances.       |
 | `customCommands`      | array    | *(none)*            | Array of custom commands to execute. See [Custom Commands](#custom-commands) section below.                         |
 
+Individual modules may also set `haEntityId` in their own config to pin their
+Home Assistant entity name. See [Naming module switches](#naming-module-switches).
+
 ## Home Assistant Integration
 
 Entities will appear automatically in Home Assistant if MQTT autodiscovery is enabled. You can control your MagicMirror from the Home Assistant dashboard or automations.
+
+### Naming module switches
+
+By default each module gets an entity named after the module, with a numeric
+suffix when several instances of the same module exist:
+
+```
+switch.my_magicmirror_clock_switch
+switch.my_magicmirror_homeassistantsensors_1_switch
+switch.my_magicmirror_homeassistantsensors_2_switch
+```
+
+Those generated names depend on **how many instances exist and in what order**.
+Add or remove one module and the suffixes shift, so an entity that used to be
+`..._2_switch` may become `..._3_switch` - and the old one is left behind in
+Home Assistant. The same happens when a count drops to one, because the suffix
+is then dropped entirely.
+
+To pin an entity to a module regardless of ordering, set `haEntityId` in that
+module's own config:
+
+```js
+{
+  module: "MMM-homeassistant-sensors",
+  position: "top_right",
+  config: {
+    haEntityId: "weather_station",
+    // ... the module's own options
+  }
+}
+```
+
+which gives `switch.my_magicmirror_weather_station_switch`.
+
+The key is read straight from the module's config and ignored by the module
+itself, so it is safe to add to any module.
+
+**Rules:**
+
+- The value must be **unique** across all modules. A duplicate is logged as an
+  error and that module falls back to the generated name.
+- It is lowercased and anything outside `a-z`, `0-9` and `_` becomes `_`, since
+  the value ends up in both the MQTT topic and the entity id.
+- Pin **all** instances of a module type, or none. Pinning one makes its
+  unpinned siblings renumber from 1, which renames their entities.
+
+### Stale entities
+
+Discovery configs are published retained, so Home Assistant keeps recreating an
+entity even after the module is gone from `config.js`. On every connect this
+module compares what it just published against what is retained for this device
+and clears the difference by publishing an empty retained payload, which tells
+Home Assistant to drop the entity.
+
+Only this device's per-module `switch` configs are pruned. The device light and
+the button entities are never touched, and nothing is pruned on a run where the
+module list was not available - otherwise a startup race could wipe every
+entity.
 
 ## Custom Commands
 

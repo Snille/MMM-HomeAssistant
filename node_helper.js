@@ -372,7 +372,9 @@ module.exports = NodeHelper.create({
         payloads.push(JSON.stringify(combinedJson));
       }
 
-      if (this.config.moduleControl) {
+      const haveModuleList = this.config.moduleControl && Array.isArray(this.modules) && this.modules.length > 0;
+
+      if (haveModuleList) {
         this.modules.forEach(element => {
           const switchJson = {
             availability_topic: this.availabilityTopic,
@@ -460,9 +462,61 @@ module.exports = NodeHelper.create({
         Log.debug('[MMM-HomeAssistant] Published config to:', topic);
       });
 
+      // Only prune when this run actually published the full module list.
+      // Without it a run that raced ahead of MODULES_UPDATE would consider
+      // every existing switch stale and delete all of them.
+      if (haveModuleList) {
+        this.removeStaleConfigs(deviceId, topics);
+      } else if (this.config.moduleControl) {
+        Log.warn('[MMM-HomeAssistant] Module list not available yet, skipping stale config cleanup');
+      }
+
     } catch (err) {
       Log.error('[MMM-HomeAssistant] Failed to publish configs:', err);
     }
+  },
+
+  // Discovery configs are published retained, so the broker hands them back to
+  // Home Assistant forever - including for modules that have since been removed
+  // from config.js, or whose generated name changed because the number of
+  // instances changed. Publishing an empty retained payload tells Home
+  // Assistant to drop the entity and clears the message from the broker.
+  removeStaleConfigs: function (deviceId, publishedTopics) {
+    const wildcard = `${this.config.autodiscoveryTopic}/switch/${deviceId}/+/config`;
+    const keep = new Set(publishedTopics);
+    const seen = new Set();
+
+    const onMessage = (topic, message) => {
+      // Only this device's per-module switches, and only ones still retained.
+      if (!topic.startsWith(`${this.config.autodiscoveryTopic}/switch/${deviceId}/`)) return;
+      if (topic.split('/').length !== 5) return;
+      if (message.length === 0) return;
+      if (keep.has(topic)) return;
+      seen.add(topic);
+    };
+
+    this.client.on('message', onMessage);
+    this.client.subscribe(wildcard, (err) => {
+      if (err) {
+        Log.error('[MMM-HomeAssistant] Could not subscribe for stale config cleanup:', err);
+        this.client.removeListener('message', onMessage);
+        return;
+      }
+      // Retained messages arrive right after SUBACK. There is no end marker,
+      // so settle for a short window before deciding what is stale.
+      setTimeout(() => {
+        this.client.removeListener('message', onMessage);
+        this.client.unsubscribe(wildcard);
+        if (seen.size === 0) {
+          Log.debug('[MMM-HomeAssistant] No stale discovery configs found');
+          return;
+        }
+        seen.forEach((topic) => {
+          this.client.publish(topic, '', { retain: true });
+          Log.info('[MMM-HomeAssistant] Removed stale discovery config:', topic);
+        });
+      }, 3000);
+    });
   },
 
   publishStates: function () {
