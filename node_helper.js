@@ -165,7 +165,9 @@ module.exports = NodeHelper.create({
           if (this.config.moduleControl) {
             if (Array.isArray(this.modules)) {
               this.modules.forEach((element) => {
-                if (payload.hasOwnProperty(element.urlPath)) {
+                // payload comes straight from JSON.parse of an MQTT message,
+                // so it may carry a "hasOwnProperty" key of its own.
+                if (Object.prototype.hasOwnProperty.call(payload, element.urlPath)) {
                   this.handleModuleSet(element.urlPath, payload);
                 }
               });
@@ -256,7 +258,7 @@ module.exports = NodeHelper.create({
     let pm2;
     try {
       pm2 = require('pm2');
-    } catch (err) {
+    } catch {
       Log.debug('[MMM-HomeAssistant] PM2 not installed or unlinked');
       return;
     }
