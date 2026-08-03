@@ -273,6 +273,7 @@ customCommands: [
 - Check the MagicMirror logs for errors or warnings (run `npm start` `npm run server` or `pm2 restart xx; pm2 logs xx` from your MagicMirror directory and watch the terminal output).
 - Use [MQTT Explorer](https://mqtt-explorer.com/) or a similar tool to easily investigate MQTT messages and topics.
 - Optionally, you can temporarily change the `autodiscoveryTopic` in your config to something like `debug` to see what messages are intended to be sent for Home Assistant autodiscovery.
+- If the entities still look healthy in Home Assistant but nothing you do there reaches the mirror, check whether the mirror is connected to the broker at all - `ss -tn state established | grep 1883` on the mirror. An empty answer means the module is not talking to MQTT, whatever Home Assistant shows, and the mirror will keep serving its own web interface as if nothing were wrong.
 
 
 ## Developer commands
