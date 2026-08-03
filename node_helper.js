@@ -7,6 +7,11 @@ const si = require('systeminformation');
 const { exec } = require('child_process');
 // const Gpio = require('onoff').Gpio;
 
+// How long the last frontend has to stay away before the MQTT connection is
+// given up. A page reload and a socket.io reconnect both pass through zero
+// clients for a moment, and neither of them means the mirror is gone.
+const MQTT_TEARDOWN_DELAY = 30000;
+
 module.exports = NodeHelper.create({
   start: function () {
     Log.info('[MMM-HomeAssistant] Module started');
@@ -24,31 +29,63 @@ module.exports = NodeHelper.create({
     this.profileValue = null;
     this.monitorPollTimer = null;
     this.staleCleanupAttempted = false;
+    this.mqttTeardownTimer = null;
 
     const nsp = this.io.of('/MMM-HomeAssistant');
     nsp.on('connection', (socket) => {
       Log.debug('[MMM-HomeAssistant] Socket connected:', socket.id);
       this.clients[socket.id] = true;
 
+      if (this.mqttTeardownTimer) {
+        clearTimeout(this.mqttTeardownTimer);
+        this.mqttTeardownTimer = null;
+      }
+
+      // The frontend only sends MQTT_INIT on DOM_OBJECTS_CREATED, so a socket
+      // that comes back on its own - socket.io reconnects after a renderer
+      // stall long enough to trip its ping timeout - never asks for MQTT
+      // again. Without this the connection stayed down until the next page
+      // load, which is how the mirror kept running while Home Assistant could
+      // no longer reach it.
+      if (this.config && !this.client) {
+        Log.info('[MMM-HomeAssistant] Frontend reconnected, reconnecting to MQTT');
+        this.watchEndpoints();
+        this.connectMQTT();
+      }
+
       socket.on('disconnect', () => {
         Log.debug('[MMM-HomeAssistant] Socket disconnected:', socket.id);
         delete this.clients[socket.id];
         if (Object.keys(this.clients).length === 0) {
-          // No clients left. Stop polling before dropping the MQTT client,
-          // otherwise the timer keeps firing publishStates() against null.
-          if (this.monitorPollTimer) {
-            clearInterval(this.monitorPollTimer);
-            this.monitorPollTimer = null;
-          }
-          // No clients connected, disconnect from MQTT
-          if (this.client) {
-            Log.debug('[MMM-HomeAssistant] No clients connected, disconnecting from MQTT');
-            this.client.end();
-            this.client = null;
-          }
+          this.mqttTeardownTimer = setTimeout(() => {
+            this.mqttTeardownTimer = null;
+            this.disconnectMQTT();
+          }, MQTT_TEARDOWN_DELAY);
         }
       });
     });
+  },
+
+  // The frontend is gone for good, so let go of the broker.
+  disconnectMQTT: function () {
+    // Stop polling before dropping the MQTT client, otherwise the timer keeps
+    // firing publishStates() against null.
+    if (this.monitorPollTimer) {
+      clearInterval(this.monitorPollTimer);
+      this.monitorPollTimer = null;
+    }
+    if (!this.client) return;
+
+    Log.info('[MMM-HomeAssistant] No clients connected, disconnecting from MQTT');
+    const client = this.client;
+    this.client = null;
+    // end() sends a proper DISCONNECT, and that tells the broker to throw the
+    // last will away - so nothing marks the device offline unless this does.
+    // It has to go out before end() as well: anything published afterwards is
+    // never sent, which is how the entities used to sit in Home Assistant
+    // looking online with nothing behind them.
+    client.publish(this.availabilityTopic, 'offline', { retain: true, qos: 1 });
+    client.end(false);
   },
 
   normalizeMqttServer: function (serverUrl) {
@@ -88,6 +125,12 @@ module.exports = NodeHelper.create({
     Log.debug('[MMM-HomeAssistant] Connecting to MQTT server:', `${mqttServer}:${mqttOptions.port}`);
     this.client = mqtt.connect(mqttServer, mqttOptions);
 
+    // Once per client, not once per 'connect'. mqtt.js reconnects on its own
+    // and re-emits 'connect' every time, and a listener added there would
+    // have handled each command once per reconnect the mirror had lived
+    // through.
+    this.client.on('message', (topic, message) => this.handleSetMessage(topic, message));
+
     this.client.on('connect', () => {
       Log.info('[MMM-HomeAssistant] Connected to MQTT');
 
@@ -120,12 +163,11 @@ module.exports = NodeHelper.create({
       if (!this.mqttCloseLogged) {
         Log.debug('[MMM-HomeAssistant] MQTT connection closed');
         this.mqttCloseLogged = true; // Set close flag to prevent repeated logging
-        // Publish last will message to availability topic.
-        // 'close' fires asynchronously, so this.client may already have been
-        // cleared by the disconnect handler that called end().
-        if (this.client) {
-          this.client.publish(this.availabilityTopic, 'offline', { retain: true });
-        }
+        // Nothing is published here. The connection is already down, so a
+        // publish would only sit in the queue until the client reconnects and
+        // then announce 'offline' about a mirror that is back. An unexpected
+        // drop is what the last will is for; a deliberate one is handled in
+        // disconnectMQTT().
       }
     });
   },
@@ -153,67 +195,67 @@ module.exports = NodeHelper.create({
         Log.debug('[MMM-HomeAssistant] Subscribed to topics:', granted.map(g => g.topic).join(', '));
       }
     });
+  },
 
-    this.client.on('message', async (topic, message) => {
-      if (topic === this.setTopic) {
-        try {
-          const payload = JSON.parse(message.toString());
-          Log.debug(`[MMM-HomeAssistant] Received message on topic ${topic}:`, payload);
+  handleSetMessage: async function (topic, message) {
+    if (topic === this.setTopic) {
+      try {
+        const payload = JSON.parse(message.toString());
+        Log.debug(`[MMM-HomeAssistant] Received message on topic ${topic}:`, payload);
 
-          if ((this.config.brightnessControl || this.config.monitorControl) &&
-            payload.state !== undefined && payload.state !== this.monitorValue) {
-            await this.handleMonitorSet(payload.state);
-          }
-
-          if (this.config.brightnessControl &&
-            payload.brightness !== undefined && payload.state !== this.brightnessValue) {
-            await this.handleBrightnessSet(payload.brightness);
-          }
-
-          if (this.config.profileControl && payload.profile !== undefined &&
-            payload.profile !== this.profileValue) {
-            this.sendSocketNotification('PROFILE_CONTROL', payload.profile);
-          }
-
-          if (this.config.moduleControl) {
-            if (Array.isArray(this.modules)) {
-              this.modules.forEach((element) => {
-                // payload comes straight from JSON.parse of an MQTT message,
-                // so it may carry a "hasOwnProperty" key of its own.
-                if (Object.prototype.hasOwnProperty.call(payload, element.urlPath)) {
-                  this.handleModuleSet(element.urlPath, payload);
-                }
-              });
-            } else {
-              Log.error('[MMM-HomeAssistant] this.modules is not an array:', this.modules);
-            }
-          }
-        } catch (err) {
-          Log.error('[MMM-HomeAssistant] Failed to parse JSON payload:', err);
+        if ((this.config.brightnessControl || this.config.monitorControl) &&
+          payload.state !== undefined && payload.state !== this.monitorValue) {
+          await this.handleMonitorSet(payload.state);
         }
-      }
 
-      if (topic === `${this.setTopic}/restart`) {
-        Log.info('[MMM-HomeAssistant] Restart command received');
-        this.handleRestart();
-      }
+        if (this.config.brightnessControl &&
+          payload.brightness !== undefined && payload.state !== this.brightnessValue) {
+          await this.handleBrightnessSet(payload.brightness);
+        }
 
-      if (topic === `${this.setTopic}/refresh`) {
-        Log.info('[MMM-HomeAssistant] Refresh command received');
-        this.handleRefresh();
-      }
+        if (this.config.profileControl && payload.profile !== undefined &&
+          payload.profile !== this.profileValue) {
+          this.sendSocketNotification('PROFILE_CONTROL', payload.profile);
+        }
 
-      // Handle custom commands
-      if (this.config.customCommands && Array.isArray(this.config.customCommands)) {
-        this.config.customCommands.forEach((cmd) => {
-          const internalName = cmd.name.toLowerCase().replace(/\s+/g, '_');
-          if (topic === `${this.setTopic}/${internalName}`) {
-            Log.info(`[MMM-HomeAssistant] Custom command received: ${cmd.name}`);
-            this.handleCustomCommand(cmd);
+        if (this.config.moduleControl) {
+          if (Array.isArray(this.modules)) {
+            this.modules.forEach((element) => {
+              // payload comes straight from JSON.parse of an MQTT message,
+              // so it may carry a "hasOwnProperty" key of its own.
+              if (Object.prototype.hasOwnProperty.call(payload, element.urlPath)) {
+                this.handleModuleSet(element.urlPath, payload);
+              }
+            });
+          } else {
+            Log.error('[MMM-HomeAssistant] this.modules is not an array:', this.modules);
           }
-        });
+        }
+      } catch (err) {
+        Log.error('[MMM-HomeAssistant] Failed to parse JSON payload:', err);
       }
-    });
+    }
+
+    if (topic === `${this.setTopic}/restart`) {
+      Log.info('[MMM-HomeAssistant] Restart command received');
+      this.handleRestart();
+    }
+
+    if (topic === `${this.setTopic}/refresh`) {
+      Log.info('[MMM-HomeAssistant] Refresh command received');
+      this.handleRefresh();
+    }
+
+    // Handle custom commands
+    if (this.config.customCommands && Array.isArray(this.config.customCommands)) {
+      this.config.customCommands.forEach((cmd) => {
+        const internalName = cmd.name.toLowerCase().replace(/\s+/g, '_');
+        if (topic === `${this.setTopic}/${internalName}`) {
+          Log.info(`[MMM-HomeAssistant] Custom command received: ${cmd.name}`);
+          this.handleCustomCommand(cmd);
+        }
+      });
+    }
   },
 
   handleMonitorSet: async function (payload) {
